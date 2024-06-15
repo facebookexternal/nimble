@@ -71,21 +71,28 @@ struct EncodingHistogramValue {
   size_t bytes;
 };
 
+enum HAlignment {
+  LEFT,
+  RIGHT,
+};
+
 class TableFormatter {
  public:
   TableFormatter(
       std::ostream& ostream,
       std::vector<std::tuple<
           std::string /* Title */,
-          uint8_t /* Width */
+          uint8_t /* Width */,
+          HAlignment /* Horizontal Alignment */
           >> fields,
       bool noHeader = false)
       : ostream_{ostream}, fields_{std::move(fields)} {
     if (!noHeader) {
       ostream << YELLOW;
       for (const auto& field : fields_) {
-        ostream << std::left << std::setw(std::get<1>(field) + 2)
-                << std::get<0>(field);
+        ostream << (std::get<2>(field) == HAlignment::RIGHT ? std::right
+                                                            : std::left)
+                << std::setw(std::get<1>(field) + 2) << std::get<0>(field);
       }
       ostream << RESET_COLOR << std::endl;
     }
@@ -94,8 +101,9 @@ class TableFormatter {
   void writeRow(const std::vector<std::string>& values) {
     assert(values.size() == fields_.size());
     for (auto i = 0; i < values.size(); ++i) {
-      ostream_ << std::left << std::setw(std::get<1>(fields_[i]) + 2)
-               << values[i];
+      ostream_ << (std::get<2>(fields_[i]) == HAlignment::RIGHT ? std::right
+                                                                : std::left)
+               << std::setw(std::get<1>(fields_[i]) + 2) << values[i];
     }
     ostream_ << std::endl;
   }
@@ -104,7 +112,8 @@ class TableFormatter {
   std::ostream& ostream_;
   std::vector<std::tuple<
       std::string /* Title */,
-      uint8_t /* Width */
+      uint8_t /* Width */,
+      HAlignment /* Horizontal Alignment */
       >>
       fields_;
 };
@@ -348,10 +357,10 @@ void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
 void NimbleDumpLib::emitStripes(bool noHeader) {
   TableFormatter formatter(
       ostream_,
-      {{"Stripe Id", 11},
-       {"Stripe Offset", 15},
-       {"Stripe Size", 15},
-       {"Row Count", 15}},
+      {{"Stripe Id", 7, LEFT},
+       {"Stripe Offset", 15, RIGHT},
+       {"Stripe Size", 15, RIGHT},
+       {"Row Count", 10, RIGHT}},
       noHeader);
   traverseTablet(*pool_, *tablet_, std::nullopt, [&](uint32_t stripeIndex) {
     auto stripeIdentifier = tablet_->getStripeIdentifier(stripeIndex);
@@ -359,9 +368,9 @@ void NimbleDumpLib::emitStripes(bool noHeader) {
     auto stripeSize = std::accumulate(sizes.begin(), sizes.end(), 0UL);
     formatter.writeRow({
         folly::to<std::string>(stripeIndex),
-        folly::to<std::string>(tablet_->stripeOffset(stripeIndex)),
-        folly::to<std::string>(stripeSize),
-        folly::to<std::string>(tablet_->stripeRowCount(stripeIndex)),
+        commaSeparated(tablet_->stripeOffset(stripeIndex)),
+        commaSeparated(stripeSize),
+        commaSeparated(tablet_->stripeRowCount(stripeIndex)),
     });
   });
 }
@@ -370,16 +379,16 @@ void NimbleDumpLib::emitStreams(
     bool noHeader,
     bool streamLabels,
     std::optional<uint32_t> stripeId) {
-  std::vector<std::tuple<std::string, uint8_t>> fields;
-  fields.push_back({"Stripe Id", 11});
-  fields.push_back({"Stream Id", 11});
-  fields.push_back({"Stream Offset", 13});
-  fields.push_back({"Stream Size", 13});
-  fields.push_back({"Item Count", 13});
+  std::vector<std::tuple<std::string, uint8_t, HAlignment>> fields;
+  fields.push_back({"Stripe Id", 11, LEFT});
+  fields.push_back({"Stream Id", 11, LEFT});
+  fields.push_back({"Stream Offset", 13, LEFT});
+  fields.push_back({"Stream Size", 13, LEFT});
+  fields.push_back({"Item Count", 13, LEFT});
   if (streamLabels) {
-    fields.push_back({"Stream Label", 16});
+    fields.push_back({"Stream Label", 16, LEFT});
   }
-  fields.push_back({"Type", 30});
+  fields.push_back({"Type", 30, LEFT});
 
   TableFormatter formatter(ostream_, fields, noHeader);
 
@@ -468,11 +477,11 @@ void NimbleDumpLib::emitHistogram(
 
   TableFormatter formatter(
       ostream_,
-      {{"Encoding Type", 17},
-       {"Data Type", 13},
-       {"Compression", 15},
-       {"Instance Count", 15},
-       {"Storage Bytes", 15}},
+      {{"Encoding Type", 17, LEFT},
+       {"Data Type", 13, LEFT},
+       {"Compression", 15, LEFT},
+       {"Instance Count", 15, RIGHT},
+       {"Storage Bytes", 15, RIGHT}},
       noHeader);
 
   for (auto& [key, value] : encodingHistogram) {
@@ -480,8 +489,8 @@ void NimbleDumpLib::emitHistogram(
         toString(key.encodingType),
         toString(key.dataType),
         key.compressinType ? toString(*key.compressinType) : "",
-        folly::to<std::string>(value.count),
-        folly::to<std::string>(value.bytes),
+        commaSeparated(value.count),
+        commaSeparated(value.bytes),
     });
   }
 }
@@ -688,11 +697,11 @@ void NimbleDumpLib::emitLayout(bool noHeader, bool compressed) {
   TableFormatter formatter(
       ostream_,
       {
-          {"Node Id", 11},
-          {"Parent Id", 11},
-          {"Node Type", 15},
-          {"Node Name", 17},
-          {"Encoding Layout", 20},
+          {"Node Id", 11, LEFT},
+          {"Parent Id", 11, LEFT},
+          {"Node Type", 15, LEFT},
+          {"Node Name", 17, LEFT},
+          {"Encoding Layout", 20, LEFT},
       },
       noHeader);
 
