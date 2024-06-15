@@ -35,6 +35,7 @@
 #include "folly/cli/NestedCommandLineApp.h"
 
 namespace facebook::nimble::tools {
+#define BOLD "\033[1m"
 #define RED "\033[31m"
 #define GREEN "\033[32m"
 #define YELLOW "\033[33m"
@@ -217,27 +218,35 @@ NimbleDumpLib::NimbleDumpLib(std::ostream& ostream, const std::string& file)
           dwio::common::request::AccessDescriptorBuilder()
               .withClientId("nimble_dump")
               .build())},
+      tablet_{std::make_shared<TabletReader>(*pool_, file_.get())},
+      reader_{std::make_shared<VeloxReader>(*pool_, tablet_)},
       ostream_{ostream} {}
 
+void NimbleDumpLib::emitRichInfo() {
+  emitInfo();
+  ostream_ << std::endl << BOLD << "Schema:" << RESET_COLOR << std::endl;
+  emitSchema();
+  ostream_ << std::endl << BOLD << "Stripes:" << RESET_COLOR << std::endl;
+  emitStripes(false);
+}
+
 void NimbleDumpLib::emitInfo() {
-  auto tablet = std::make_shared<TabletReader>(*pool_, file_.get());
   ostream_ << CYAN << "Nimble File " << RESET_COLOR << "Version "
-           << tablet->majorVersion() << "." << tablet->minorVersion()
+           << tablet_->majorVersion() << "." << tablet_->minorVersion()
            << std::endl;
-  ostream_ << "File Size: " << commaSeparated(tablet->fileSize()) << std::endl;
-  ostream_ << "Checksum: " << tablet->checksum() << " ["
-           << nimble::toString(tablet->checksumType()) << "]" << std::endl;
-  ostream_ << "Footer Compression: " << tablet->footerCompressionType()
+  ostream_ << "File Size: " << commaSeparated(tablet_->fileSize()) << std::endl;
+  ostream_ << "Checksum: " << tablet_->checksum() << " ["
+           << nimble::toString(tablet_->checksumType()) << "]" << std::endl;
+  ostream_ << "Footer Compression: " << tablet_->footerCompressionType()
            << std::endl;
-  ostream_ << "Footer Size: " << commaSeparated(tablet->footerSize())
+  ostream_ << "Footer Size: " << commaSeparated(tablet_->footerSize())
            << std::endl;
-  ostream_ << "Stripe Count: " << commaSeparated(tablet->stripeCount())
+  ostream_ << "Stripe Count: " << commaSeparated(tablet_->stripeCount())
            << std::endl;
-  ostream_ << "Row Count: " << commaSeparated(tablet->tabletRowCount())
+  ostream_ << "Row Count: " << commaSeparated(tablet_->tabletRowCount())
            << std::endl;
 
-  VeloxReader reader{*pool_, tablet};
-  auto& metadata = reader.metadata();
+  auto& metadata = reader_->metadata();
   if (!metadata.empty()) {
     ostream_ << "Metadata:";
     for (const auto& pair : metadata) {
@@ -248,9 +257,6 @@ void NimbleDumpLib::emitInfo() {
 }
 
 void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
-  auto tablet = std::make_shared<TabletReader>(*pool_, file_.get());
-  VeloxReader reader{*pool_, tablet};
-
   auto emitOffsets = [](const Type& type) {
     std::string offsets;
     switch (type.kind()) {
@@ -304,7 +310,7 @@ void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
 
   bool skipping = false;
   SchemaReader::traverseSchema(
-      reader.schema(),
+      reader_->schema(),
       [&](uint32_t level,
           const Type& type,
           const SchemaReader::NodeInfo& info) {
@@ -340,7 +346,6 @@ void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
 }
 
 void NimbleDumpLib::emitStripes(bool noHeader) {
-  TabletReader tabletReader{*pool_, file_.get()};
   TableFormatter formatter(
       ostream_,
       {{"Stripe Id", 11},
@@ -348,15 +353,15 @@ void NimbleDumpLib::emitStripes(bool noHeader) {
        {"Stripe Size", 15},
        {"Row Count", 15}},
       noHeader);
-  traverseTablet(*pool_, tabletReader, std::nullopt, [&](uint32_t stripeIndex) {
-    auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeIndex);
-    auto sizes = tabletReader.streamSizes(stripeIdentifier);
+  traverseTablet(*pool_, *tablet_, std::nullopt, [&](uint32_t stripeIndex) {
+    auto stripeIdentifier = tablet_->getStripeIdentifier(stripeIndex);
+    auto sizes = tablet_->streamSizes(stripeIdentifier);
     auto stripeSize = std::accumulate(sizes.begin(), sizes.end(), 0UL);
     formatter.writeRow({
         folly::to<std::string>(stripeIndex),
-        folly::to<std::string>(tabletReader.stripeOffset(stripeIndex)),
+        folly::to<std::string>(tablet_->stripeOffset(stripeIndex)),
         folly::to<std::string>(stripeSize),
-        folly::to<std::string>(tabletReader.stripeRowCount(stripeIndex)),
+        folly::to<std::string>(tablet_->stripeRowCount(stripeIndex)),
     });
   });
 }
@@ -365,8 +370,6 @@ void NimbleDumpLib::emitStreams(
     bool noHeader,
     bool streamLabels,
     std::optional<uint32_t> stripeId) {
-  auto tabletReader = std::make_shared<TabletReader>(*pool_, file_.get());
-
   std::vector<std::tuple<std::string, uint8_t>> fields;
   fields.push_back({"Stripe Id", 11});
   fields.push_back({"Stream Id", 11});
@@ -382,17 +385,16 @@ void NimbleDumpLib::emitStreams(
 
   std::optional<StreamLabels> labels{};
   if (streamLabels) {
-    VeloxReader reader{*pool_, tabletReader};
-    labels.emplace(reader.schema());
+    labels.emplace(reader_->schema());
   }
 
   traverseTablet(
       *pool_,
-      *tabletReader,
+      *tablet_,
       stripeId,
       nullptr /* stripeVisitor */,
       [&](ChunkedStream& stream, uint32_t stripeId, uint32_t streamId) {
-        auto stripeIdentifier = tabletReader->getStripeIdentifier(stripeId);
+        auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
         uint32_t itemCount = 0;
         while (stream.hasNext()) {
           auto chunk = stream.nextChunk();
@@ -403,9 +405,9 @@ void NimbleDumpLib::emitStreams(
         values.push_back(folly::to<std::string>(stripeId));
         values.push_back(folly::to<std::string>(streamId));
         values.push_back(folly::to<std::string>(
-            tabletReader->streamOffsets(stripeIdentifier)[streamId]));
+            tablet_->streamOffsets(stripeIdentifier)[streamId]));
         values.push_back(folly::to<std::string>(
-            tabletReader->streamSizes(stripeIdentifier)[streamId]));
+            tablet_->streamSizes(stripeIdentifier)[streamId]));
         values.push_back(folly::to<std::string>(itemCount));
         if (streamLabels) {
           auto it = values.emplace_back(labels->streamLabel(streamId));
@@ -419,7 +421,6 @@ void NimbleDumpLib::emitHistogram(
     bool topLevel,
     bool noHeader,
     std::optional<uint32_t> stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
   std::map<GroupingKey, EncodingHistogramValue, GroupingKeyCompare>
       encodingHistogram;
   const std::unordered_map<std::string, CompressionType> compressionMap{
@@ -429,7 +430,7 @@ void NimbleDumpLib::emitHistogram(
   };
   traverseTablet(
       *pool_,
-      tabletReader,
+      *tablet_,
       stripeId,
       nullptr,
       [&](ChunkedStream& stream, auto /*stripeIndex*/, auto /*streamIndex*/) {
@@ -488,21 +489,19 @@ void NimbleDumpLib::emitHistogram(
 void NimbleDumpLib::emitContent(
     uint32_t streamId,
     std::optional<uint32_t> stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
-
   uint32_t maxStreamCount;
   bool found = false;
-  traverseTablet(*pool_, tabletReader, stripeId, [&](uint32_t stripeId) {
-    auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeId);
+  traverseTablet(*pool_, *tablet_, stripeId, [&](uint32_t stripeId) {
+    auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
     maxStreamCount =
-        std::max(maxStreamCount, tabletReader.streamCount(stripeIdentifier));
-    if (streamId >= tabletReader.streamCount(stripeIdentifier)) {
+        std::max(maxStreamCount, tablet_->streamCount(stripeIdentifier));
+    if (streamId >= tablet_->streamCount(stripeIdentifier)) {
       return;
     }
 
     found = true;
 
-    auto streams = tabletReader.load(stripeIdentifier, std::vector{streamId});
+    auto streams = tablet_->load(stripeIdentifier, std::vector{streamId});
 
     if (auto& stream = streams[0]) {
       InMemoryChunkedStream chunkedStream{*pool_, std::move(stream)};
@@ -533,18 +532,17 @@ void NimbleDumpLib::emitBinary(
     std::function<std::unique_ptr<std::ostream>()> outputFactory,
     uint32_t streamId,
     uint32_t stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
-  auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeId);
-  if (streamId >= tabletReader.streamCount(stripeIdentifier)) {
+  auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
+  if (streamId >= tablet_->streamCount(stripeIdentifier)) {
     throw folly::ProgramExit(
         -1,
         fmt::format(
             "Stream identifier {} is out of bound. Must be between 0 and {}\n",
             streamId,
-            tabletReader.streamCount(stripeIdentifier)));
+            tablet_->streamCount(stripeIdentifier)));
   }
 
-  auto streams = tabletReader.load(stripeIdentifier, std::vector{streamId});
+  auto streams = tablet_->load(stripeIdentifier, std::vector{streamId});
 
   if (auto& stream = streams[0]) {
     auto output = outputFactory();
