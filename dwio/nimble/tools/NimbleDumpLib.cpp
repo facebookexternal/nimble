@@ -54,21 +54,44 @@ struct GroupingKey {
   std::optional<CompressionType> compressinType;
 };
 
-struct GroupingKeyCompare {
-  size_t operator()(const GroupingKey& lhs, const GroupingKey& rhs) const {
-    if (lhs.encodingType != rhs.encodingType) {
-      return lhs.encodingType < rhs.encodingType;
-    } else if (lhs.dataType != rhs.dataType) {
-      return lhs.dataType < rhs.dataType;
-    } else {
-      return lhs.compressinType < rhs.compressinType;
-    }
+struct GroupingKeyHash {
+  size_t operator()(const GroupingKey& key) const {
+    size_t h1 = std::hash<EncodingType>()(key.encodingType);
+    size_t h2 = std::hash<DataType>()(key.dataType);
+    size_t h3 = std::hash<std::optional<CompressionType>>()(key.compressinType);
+    return h1 ^ (h2 << 1) ^ (h3 << 2);
+  }
+};
+
+struct GroupingKeyEqual {
+  bool operator()(const GroupingKey& lhs, const GroupingKey& rhs) const {
+    return lhs.encodingType == rhs.encodingType &&
+        lhs.dataType == rhs.dataType &&
+        lhs.compressinType == rhs.compressinType;
   }
 };
 
 struct EncodingHistogramValue {
   size_t count;
   size_t bytes;
+};
+
+struct HistogramRowCompare {
+  size_t operator()(
+      const std::unordered_map<GroupingKey, EncodingHistogramValue>::
+          const_iterator& lhs,
+      const std::unordered_map<GroupingKey, EncodingHistogramValue>::
+          const_iterator& rhs) const {
+    const auto lhsEncoding = lhs->first.encodingType;
+    const auto rhsEncoding = rhs->first.encodingType;
+    const auto lhsSize = lhs->second.bytes;
+    const auto rhsSize = rhs->second.bytes;
+    if (lhsEncoding != rhsEncoding) {
+      return lhsEncoding < rhsEncoding;
+    } else {
+      return lhsSize > rhsSize;
+    }
+  }
 };
 
 enum HAlignment {
@@ -430,7 +453,11 @@ void NimbleDumpLib::emitHistogram(
     bool topLevel,
     bool noHeader,
     std::optional<uint32_t> stripeId) {
-  std::map<GroupingKey, EncodingHistogramValue, GroupingKeyCompare>
+  std::unordered_map<
+      GroupingKey,
+      EncodingHistogramValue,
+      GroupingKeyHash,
+      GroupingKeyEqual>
       encodingHistogram;
   const std::unordered_map<std::string, CompressionType> compressionMap{
       {toString(CompressionType::Uncompressed), CompressionType::Uncompressed},
@@ -484,13 +511,22 @@ void NimbleDumpLib::emitHistogram(
        {"Storage Bytes", 15, RIGHT}},
       noHeader);
 
-  for (auto& [key, value] : encodingHistogram) {
+  std::vector<
+      std::unordered_map<GroupingKey, EncodingHistogramValue>::const_iterator>
+      rows;
+  for (auto it = encodingHistogram.begin(); it != encodingHistogram.end();
+       ++it) {
+    rows.push_back(it);
+  }
+  std::sort(rows.begin(), rows.end(), HistogramRowCompare{});
+
+  for (const auto& it : rows) {
     formatter.writeRow({
-        toString(key.encodingType),
-        toString(key.dataType),
-        key.compressinType ? toString(*key.compressinType) : "",
-        commaSeparated(value.count),
-        commaSeparated(value.bytes),
+        toString(it->first.encodingType),
+        toString(it->first.dataType),
+        it->first.compressinType ? toString(*it->first.compressinType) : "",
+        commaSeparated(it->second.count),
+        commaSeparated(it->second.bytes),
     });
   }
 }
