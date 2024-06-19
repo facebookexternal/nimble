@@ -508,7 +508,8 @@ void NimbleDumpLib::emitHistogram(
        {"Data Type", 13, LEFT},
        {"Compression", 15, LEFT},
        {"Instance Count", 15, RIGHT},
-       {"Storage Bytes", 15, RIGHT}},
+       {"Storage Bytes", 15, RIGHT},
+       {"Storage %", 10, RIGHT}},
       noHeader);
 
   std::vector<
@@ -519,6 +520,7 @@ void NimbleDumpLib::emitHistogram(
     rows.push_back(it);
   }
   std::sort(rows.begin(), rows.end(), HistogramRowCompare{});
+  auto fileSize = tablet_->fileSize();
 
   for (const auto& it : rows) {
     formatter.writeRow({
@@ -527,6 +529,7 @@ void NimbleDumpLib::emitHistogram(
         it->first.compressinType ? toString(*it->first.compressinType) : "",
         commaSeparated(it->second.count),
         commaSeparated(it->second.bytes),
+        fmt::format("{:.{}f}", it->second.bytes * 100.0 / fileSize, 2),
     });
   }
 }
