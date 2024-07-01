@@ -35,6 +35,7 @@
 #include "folly/cli/NestedCommandLineApp.h"
 
 namespace facebook::nimble::tools {
+#define BOLD "\033[1m"
 #define RED "\033[31m"
 #define GREEN "\033[32m"
 #define YELLOW "\033[33m"
@@ -53,15 +54,20 @@ struct GroupingKey {
   std::optional<CompressionType> compressinType;
 };
 
-struct GroupingKeyCompare {
-  size_t operator()(const GroupingKey& lhs, const GroupingKey& rhs) const {
-    if (lhs.encodingType != rhs.encodingType) {
-      return lhs.encodingType < rhs.encodingType;
-    } else if (lhs.dataType != rhs.dataType) {
-      return lhs.dataType < rhs.dataType;
-    } else {
-      return lhs.compressinType < rhs.compressinType;
-    }
+struct GroupingKeyHash {
+  size_t operator()(const GroupingKey& key) const {
+    size_t h1 = std::hash<EncodingType>()(key.encodingType);
+    size_t h2 = std::hash<DataType>()(key.dataType);
+    size_t h3 = std::hash<std::optional<CompressionType>>()(key.compressinType);
+    return h1 ^ (h2 << 1) ^ (h3 << 2);
+  }
+};
+
+struct GroupingKeyEqual {
+  bool operator()(const GroupingKey& lhs, const GroupingKey& rhs) const {
+    return lhs.encodingType == rhs.encodingType &&
+        lhs.dataType == rhs.dataType &&
+        lhs.compressinType == rhs.compressinType;
   }
 };
 
@@ -70,21 +76,46 @@ struct EncodingHistogramValue {
   size_t bytes;
 };
 
+struct HistogramRowCompare {
+  size_t operator()(
+      const std::unordered_map<GroupingKey, EncodingHistogramValue>::
+          const_iterator& lhs,
+      const std::unordered_map<GroupingKey, EncodingHistogramValue>::
+          const_iterator& rhs) const {
+    const auto lhsEncoding = lhs->first.encodingType;
+    const auto rhsEncoding = rhs->first.encodingType;
+    const auto lhsSize = lhs->second.bytes;
+    const auto rhsSize = rhs->second.bytes;
+    if (lhsEncoding != rhsEncoding) {
+      return lhsEncoding < rhsEncoding;
+    } else {
+      return lhsSize > rhsSize;
+    }
+  }
+};
+
+enum HAlignment {
+  LEFT,
+  RIGHT,
+};
+
 class TableFormatter {
  public:
   TableFormatter(
       std::ostream& ostream,
       std::vector<std::tuple<
           std::string /* Title */,
-          uint8_t /* Width */
+          uint8_t /* Width */,
+          HAlignment /* Horizontal Alignment */
           >> fields,
       bool noHeader = false)
       : ostream_{ostream}, fields_{std::move(fields)} {
     if (!noHeader) {
       ostream << YELLOW;
       for (const auto& field : fields_) {
-        ostream << std::left << std::setw(std::get<1>(field) + 2)
-                << std::get<0>(field);
+        ostream << (std::get<2>(field) == HAlignment::RIGHT ? std::right
+                                                            : std::left)
+                << std::setw(std::get<1>(field) + 2) << std::get<0>(field);
       }
       ostream << RESET_COLOR << std::endl;
     }
@@ -93,8 +124,9 @@ class TableFormatter {
   void writeRow(const std::vector<std::string>& values) {
     assert(values.size() == fields_.size());
     for (auto i = 0; i < values.size(); ++i) {
-      ostream_ << std::left << std::setw(std::get<1>(fields_[i]) + 2)
-               << values[i];
+      ostream_ << (std::get<2>(fields_[i]) == HAlignment::RIGHT ? std::right
+                                                                : std::left)
+               << std::setw(std::get<1>(fields_[i]) + 2) << values[i];
     }
     ostream_ << std::endl;
   }
@@ -103,7 +135,8 @@ class TableFormatter {
   std::ostream& ostream_;
   std::vector<std::tuple<
       std::string /* Title */,
-      uint8_t /* Width */
+      uint8_t /* Width */,
+      HAlignment /* Horizontal Alignment */
       >>
       fields_;
 };
@@ -217,27 +250,35 @@ NimbleDumpLib::NimbleDumpLib(std::ostream& ostream, const std::string& file)
           dwio::common::request::AccessDescriptorBuilder()
               .withClientId("nimble_dump")
               .build())},
+      tablet_{std::make_shared<TabletReader>(*pool_, file_.get())},
+      reader_{std::make_shared<VeloxReader>(*pool_, tablet_)},
       ostream_{ostream} {}
 
+void NimbleDumpLib::emitRichInfo() {
+  emitInfo();
+  ostream_ << std::endl << BOLD << "Schema:" << RESET_COLOR << std::endl;
+  emitSchema();
+  ostream_ << std::endl << BOLD << "Stripes:" << RESET_COLOR << std::endl;
+  emitStripes(false);
+}
+
 void NimbleDumpLib::emitInfo() {
-  auto tablet = std::make_shared<TabletReader>(*pool_, file_.get());
   ostream_ << CYAN << "Nimble File " << RESET_COLOR << "Version "
-           << tablet->majorVersion() << "." << tablet->minorVersion()
+           << tablet_->majorVersion() << "." << tablet_->minorVersion()
            << std::endl;
-  ostream_ << "File Size: " << commaSeparated(tablet->fileSize()) << std::endl;
-  ostream_ << "Checksum: " << tablet->checksum() << " ["
-           << nimble::toString(tablet->checksumType()) << "]" << std::endl;
-  ostream_ << "Footer Compression: " << tablet->footerCompressionType()
+  ostream_ << "File Size: " << commaSeparated(tablet_->fileSize()) << std::endl;
+  ostream_ << "Checksum: " << tablet_->checksum() << " ["
+           << nimble::toString(tablet_->checksumType()) << "]" << std::endl;
+  ostream_ << "Footer Compression: " << tablet_->footerCompressionType()
            << std::endl;
-  ostream_ << "Footer Size: " << commaSeparated(tablet->footerSize())
+  ostream_ << "Footer Size: " << commaSeparated(tablet_->footerSize())
            << std::endl;
-  ostream_ << "Stripe Count: " << commaSeparated(tablet->stripeCount())
+  ostream_ << "Stripe Count: " << commaSeparated(tablet_->stripeCount())
            << std::endl;
-  ostream_ << "Row Count: " << commaSeparated(tablet->tabletRowCount())
+  ostream_ << "Row Count: " << commaSeparated(tablet_->tabletRowCount())
            << std::endl;
 
-  VeloxReader reader{*pool_, tablet};
-  auto& metadata = reader.metadata();
+  auto& metadata = reader_->metadata();
   if (!metadata.empty()) {
     ostream_ << "Metadata:";
     for (const auto& pair : metadata) {
@@ -248,9 +289,6 @@ void NimbleDumpLib::emitInfo() {
 }
 
 void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
-  auto tablet = std::make_shared<TabletReader>(*pool_, file_.get());
-  VeloxReader reader{*pool_, tablet};
-
   auto emitOffsets = [](const Type& type) {
     std::string offsets;
     switch (type.kind()) {
@@ -304,7 +342,7 @@ void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
 
   bool skipping = false;
   SchemaReader::traverseSchema(
-      reader.schema(),
+      reader_->schema(),
       [&](uint32_t level,
           const Type& type,
           const SchemaReader::NodeInfo& info) {
@@ -340,23 +378,22 @@ void NimbleDumpLib::emitSchema(bool collapseFlatMap) {
 }
 
 void NimbleDumpLib::emitStripes(bool noHeader) {
-  TabletReader tabletReader{*pool_, file_.get()};
   TableFormatter formatter(
       ostream_,
-      {{"Stripe Id", 11},
-       {"Stripe Offset", 15},
-       {"Stripe Size", 15},
-       {"Row Count", 15}},
+      {{"Stripe Id", 7, LEFT},
+       {"Stripe Offset", 15, RIGHT},
+       {"Stripe Size", 15, RIGHT},
+       {"Row Count", 10, RIGHT}},
       noHeader);
-  traverseTablet(*pool_, tabletReader, std::nullopt, [&](uint32_t stripeIndex) {
-    auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeIndex);
-    auto sizes = tabletReader.streamSizes(stripeIdentifier);
+  traverseTablet(*pool_, *tablet_, std::nullopt, [&](uint32_t stripeIndex) {
+    auto stripeIdentifier = tablet_->getStripeIdentifier(stripeIndex);
+    auto sizes = tablet_->streamSizes(stripeIdentifier);
     auto stripeSize = std::accumulate(sizes.begin(), sizes.end(), 0UL);
     formatter.writeRow({
         folly::to<std::string>(stripeIndex),
-        folly::to<std::string>(tabletReader.stripeOffset(stripeIndex)),
-        folly::to<std::string>(stripeSize),
-        folly::to<std::string>(tabletReader.stripeRowCount(stripeIndex)),
+        commaSeparated(tablet_->stripeOffset(stripeIndex)),
+        commaSeparated(stripeSize),
+        commaSeparated(tablet_->stripeRowCount(stripeIndex)),
     });
   });
 }
@@ -365,34 +402,31 @@ void NimbleDumpLib::emitStreams(
     bool noHeader,
     bool streamLabels,
     std::optional<uint32_t> stripeId) {
-  auto tabletReader = std::make_shared<TabletReader>(*pool_, file_.get());
-
-  std::vector<std::tuple<std::string, uint8_t>> fields;
-  fields.push_back({"Stripe Id", 11});
-  fields.push_back({"Stream Id", 11});
-  fields.push_back({"Stream Offset", 13});
-  fields.push_back({"Stream Size", 13});
-  fields.push_back({"Item Count", 13});
+  std::vector<std::tuple<std::string, uint8_t, HAlignment>> fields;
+  fields.push_back({"Stripe Id", 11, LEFT});
+  fields.push_back({"Stream Id", 11, LEFT});
+  fields.push_back({"Stream Offset", 13, LEFT});
+  fields.push_back({"Stream Size", 13, LEFT});
+  fields.push_back({"Item Count", 13, LEFT});
   if (streamLabels) {
-    fields.push_back({"Stream Label", 16});
+    fields.push_back({"Stream Label", 16, LEFT});
   }
-  fields.push_back({"Type", 30});
+  fields.push_back({"Type", 30, LEFT});
 
   TableFormatter formatter(ostream_, fields, noHeader);
 
   std::optional<StreamLabels> labels{};
   if (streamLabels) {
-    VeloxReader reader{*pool_, tabletReader};
-    labels.emplace(reader.schema());
+    labels.emplace(reader_->schema());
   }
 
   traverseTablet(
       *pool_,
-      *tabletReader,
+      *tablet_,
       stripeId,
       nullptr /* stripeVisitor */,
       [&](ChunkedStream& stream, uint32_t stripeId, uint32_t streamId) {
-        auto stripeIdentifier = tabletReader->getStripeIdentifier(stripeId);
+        auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
         uint32_t itemCount = 0;
         while (stream.hasNext()) {
           auto chunk = stream.nextChunk();
@@ -403,9 +437,9 @@ void NimbleDumpLib::emitStreams(
         values.push_back(folly::to<std::string>(stripeId));
         values.push_back(folly::to<std::string>(streamId));
         values.push_back(folly::to<std::string>(
-            tabletReader->streamOffsets(stripeIdentifier)[streamId]));
+            tablet_->streamOffsets(stripeIdentifier)[streamId]));
         values.push_back(folly::to<std::string>(
-            tabletReader->streamSizes(stripeIdentifier)[streamId]));
+            tablet_->streamSizes(stripeIdentifier)[streamId]));
         values.push_back(folly::to<std::string>(itemCount));
         if (streamLabels) {
           auto it = values.emplace_back(labels->streamLabel(streamId));
@@ -419,8 +453,11 @@ void NimbleDumpLib::emitHistogram(
     bool topLevel,
     bool noHeader,
     std::optional<uint32_t> stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
-  std::map<GroupingKey, EncodingHistogramValue, GroupingKeyCompare>
+  std::unordered_map<
+      GroupingKey,
+      EncodingHistogramValue,
+      GroupingKeyHash,
+      GroupingKeyEqual>
       encodingHistogram;
   const std::unordered_map<std::string, CompressionType> compressionMap{
       {toString(CompressionType::Uncompressed), CompressionType::Uncompressed},
@@ -429,7 +466,7 @@ void NimbleDumpLib::emitHistogram(
   };
   traverseTablet(
       *pool_,
-      tabletReader,
+      *tablet_,
       stripeId,
       nullptr,
       [&](ChunkedStream& stream, auto /*stripeIndex*/, auto /*streamIndex*/) {
@@ -467,20 +504,32 @@ void NimbleDumpLib::emitHistogram(
 
   TableFormatter formatter(
       ostream_,
-      {{"Encoding Type", 17},
-       {"Data Type", 13},
-       {"Compression", 15},
-       {"Instance Count", 15},
-       {"Storage Bytes", 15}},
+      {{"Encoding Type", 17, LEFT},
+       {"Data Type", 13, LEFT},
+       {"Compression", 15, LEFT},
+       {"Instance Count", 15, RIGHT},
+       {"Storage Bytes", 15, RIGHT},
+       {"Storage %", 10, RIGHT}},
       noHeader);
 
-  for (auto& [key, value] : encodingHistogram) {
+  std::vector<
+      std::unordered_map<GroupingKey, EncodingHistogramValue>::const_iterator>
+      rows;
+  for (auto it = encodingHistogram.begin(); it != encodingHistogram.end();
+       ++it) {
+    rows.push_back(it);
+  }
+  std::sort(rows.begin(), rows.end(), HistogramRowCompare{});
+  auto fileSize = tablet_->fileSize();
+
+  for (const auto& it : rows) {
     formatter.writeRow({
-        toString(key.encodingType),
-        toString(key.dataType),
-        key.compressinType ? toString(*key.compressinType) : "",
-        folly::to<std::string>(value.count),
-        folly::to<std::string>(value.bytes),
+        toString(it->first.encodingType),
+        toString(it->first.dataType),
+        it->first.compressinType ? toString(*it->first.compressinType) : "",
+        commaSeparated(it->second.count),
+        commaSeparated(it->second.bytes),
+        fmt::format("{:.{}f}", it->second.bytes * 100.0 / fileSize, 2),
     });
   }
 }
@@ -488,21 +537,19 @@ void NimbleDumpLib::emitHistogram(
 void NimbleDumpLib::emitContent(
     uint32_t streamId,
     std::optional<uint32_t> stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
-
   uint32_t maxStreamCount;
   bool found = false;
-  traverseTablet(*pool_, tabletReader, stripeId, [&](uint32_t stripeId) {
-    auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeId);
+  traverseTablet(*pool_, *tablet_, stripeId, [&](uint32_t stripeId) {
+    auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
     maxStreamCount =
-        std::max(maxStreamCount, tabletReader.streamCount(stripeIdentifier));
-    if (streamId >= tabletReader.streamCount(stripeIdentifier)) {
+        std::max(maxStreamCount, tablet_->streamCount(stripeIdentifier));
+    if (streamId >= tablet_->streamCount(stripeIdentifier)) {
       return;
     }
 
     found = true;
 
-    auto streams = tabletReader.load(stripeIdentifier, std::vector{streamId});
+    auto streams = tablet_->load(stripeIdentifier, std::vector{streamId});
 
     if (auto& stream = streams[0]) {
       InMemoryChunkedStream chunkedStream{*pool_, std::move(stream)};
@@ -533,18 +580,17 @@ void NimbleDumpLib::emitBinary(
     std::function<std::unique_ptr<std::ostream>()> outputFactory,
     uint32_t streamId,
     uint32_t stripeId) {
-  TabletReader tabletReader{*pool_, file_.get()};
-  auto stripeIdentifier = tabletReader.getStripeIdentifier(stripeId);
-  if (streamId >= tabletReader.streamCount(stripeIdentifier)) {
+  auto stripeIdentifier = tablet_->getStripeIdentifier(stripeId);
+  if (streamId >= tablet_->streamCount(stripeIdentifier)) {
     throw folly::ProgramExit(
         -1,
         fmt::format(
             "Stream identifier {} is out of bound. Must be between 0 and {}\n",
             streamId,
-            tabletReader.streamCount(stripeIdentifier)));
+            tablet_->streamCount(stripeIdentifier)));
   }
 
-  auto streams = tabletReader.load(stripeIdentifier, std::vector{streamId});
+  auto streams = tablet_->load(stripeIdentifier, std::vector{streamId});
 
   if (auto& stream = streams[0]) {
     auto output = outputFactory();
@@ -690,11 +736,11 @@ void NimbleDumpLib::emitLayout(bool noHeader, bool compressed) {
   TableFormatter formatter(
       ostream_,
       {
-          {"Node Id", 11},
-          {"Parent Id", 11},
-          {"Node Type", 15},
-          {"Node Name", 17},
-          {"Encoding Layout", 20},
+          {"Node Id", 11, LEFT},
+          {"Parent Id", 11, LEFT},
+          {"Node Type", 15, LEFT},
+          {"Node Name", 17, LEFT},
+          {"Encoding Layout", 20, LEFT},
       },
       noHeader);
 

@@ -18,6 +18,7 @@
 #include <ostream>
 
 #include "dwio/nimble/encodings/Encoding.h"
+#include "dwio/nimble/velox/VeloxReader.h"
 #include "velox/common/file/File.h"
 
 namespace facebook::nimble::tools {
@@ -26,6 +27,7 @@ class NimbleDumpLib {
  public:
   NimbleDumpLib(std::ostream& ostream, const std::string& file);
 
+  void emitRichInfo();
   void emitInfo();
   void emitSchema(bool collapseFlatMap = true);
   void emitStripes(bool noHeader);
@@ -45,6 +47,8 @@ class NimbleDumpLib {
  private:
   std::shared_ptr<velox::memory::MemoryPool> pool_;
   std::shared_ptr<velox::ReadFile> file_;
+  std::shared_ptr<TabletReader> tablet_;
+  std::shared_ptr<VeloxReader> reader_;
   std::ostream& ostream_;
 };
 } // namespace facebook::nimble::tools

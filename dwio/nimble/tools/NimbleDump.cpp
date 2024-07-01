@@ -60,12 +60,12 @@ int main(int argc, char* argv[]) {
          "info",
          "<file>",
          "Print file information",
-         "Prints file information from the file footer.",
+         "Prints file information.",
          [](const po::variables_map& options,
             const std::vector<std::string>& /*args*/) {
            nimble::tools::NimbleDumpLib{
                std::cout, options["file"].as<std::string>()}
-               .emitInfo();
+               .emitRichInfo();
          },
          positionalArgs)
       .add_options()(
